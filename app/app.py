@@ -47,5 +47,5 @@ def predict( fixed_acidity: float,
     ]])
     prediction = model.predict(features)
 
-    return {"name": "Thrinadh", "roll_no": "2022BCS0178", "wine_quality": float(prediction[0])}
+    return {"name": "Thrinadh", "roll_no": "2022BCS0178", "wine_quality": int(round(prediction[0]))}
 
