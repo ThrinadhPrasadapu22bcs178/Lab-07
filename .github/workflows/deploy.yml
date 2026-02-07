@@ -80,7 +80,9 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/wine-quality:latest
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/wine-quality:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/wine-quality:${{ github.run_id }}
 
       - name: Update Best Metrics Variables
         if: steps.check_metrics.outputs.improvement == 'true'
