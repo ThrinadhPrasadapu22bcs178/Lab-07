@@ -1,0 +1,104 @@
+name: Train and Deploy
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run training script
+        run: python scripts/train.py
+
+      - name: Upload model artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-artifacts
+          path: app/artifacts/
+
+  deploy:
+    needs: train
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download model artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: model-artifacts
+          path: app/artifacts/
+
+      - name: Compare metrics and decide deployment
+        id: check_metrics
+        run: |
+          CURRENT_R2=$(jq -r '.R2' app/artifacts/metrics.json)
+          BEST_R2=${{ vars.BEST_R2 || 0 }}
+          
+          echo "Current R2 Score: $CURRENT_R2"
+          echo "Best R2 Score so far: $BEST_R2"
+          
+          # Compare scores using bc (handles floats)
+          IS_BETTER=$(echo "$CURRENT_R2 > $BEST_R2" | bc -l)
+          
+          if [ "$IS_BETTER" -eq "1" ]; then
+            echo "improvement=true" >> $GITHUB_OUTPUT
+            echo "NEW_R2=$CURRENT_R2" >> $GITHUB_ENV
+            echo "NEW_MSE=$(jq -r '.MSE' app/artifacts/metrics.json)" >> $GITHUB_ENV
+            echo "Metric improved. Proceeding with deployment."
+          else
+            echo "improvement=false" >> $GITHUB_OUTPUT
+            echo "2022BCS0178:---Metric did not improve"
+          fi
+        shell: bash
+
+      - name: Login to Docker Hub
+        if: steps.check_metrics.outputs.improvement == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        if: steps.check_metrics.outputs.improvement == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/wine-quality:latest
+
+      - name: Update Best Metrics Variables
+        if: steps.check_metrics.outputs.improvement == 'true'
+        run: |
+          # Update BEST_R2
+          curl -L \
+            -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.GH_PAT }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/${{ github.repository }}/actions/variables/BEST_R2 \
+            -d "{\"name\":\"BEST_R2\",\"value\":\"${{ env.NEW_R2 }}\"}"
+          
+          # Update BEST_MSE
+          curl -L \
+            -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.GH_PAT }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/${{ github.repository }}/actions/variables/BEST_MSE \
+            -d "{\"name\":\"BEST_MSE\",\"value\":\"${{ env.NEW_MSE }}\"}"
