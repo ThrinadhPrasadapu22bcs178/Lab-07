@@ -43,16 +43,16 @@ pipeline {
                 script {
                     echo "Waiting for API to respond to health endpoint..."
                     def ready = false
-                    // Retry up to 10 times with 3 seconds delay (30s timeout)
-                    for (int i = 0; i < 10; i++) {
+                    // Retry up to 15 times with 5 seconds delay (75s timeout)
+                    for (int i = 0; i < 15; i++) {
                         def res = sh(script: "curl -s -o /dev/null -w '%{http_code}' http://localhost:${env.API_PORT}/docs || echo 'FAIL'", returnStdout: true).trim()
                         if (res == '200' || res == '307') {
                             ready = true
                             echo "Service is ready."
                             break
                         }
-                        echo "Service not ready yet, retrying in 3 seconds..."
-                        sleep(3)
+                        echo "Service not ready yet, retrying in 5 seconds..."
+                        sleep(5)
                     }
 
                     if (!ready) {
