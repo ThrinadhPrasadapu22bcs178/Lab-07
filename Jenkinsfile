@@ -2,97 +2,156 @@ pipeline {
     agent any
 
     environment {
-        DOCKER_IMAGE = 'thrinadhprasadapu/wine-quality'
-        REGISTRY_CREDENTIALS = 'dockerhub-creds'
+        // Task 1: Prepare Test Inputs
+        // Valid inference input matching the feature structure
+        VALID_INPUT_QUERY = 'fixed_acidity=7.4&volatile_acidity=0.7&citric_acid=0&residual_sugar=1.9&chlorides=0.076&free_sulfur_dioxide=11&total_sulfur_dioxide=34&density=0.9978&ph=3.51&sulphates=0.56&alcohol=9.4'
+        // Invalid input with missing fields and bad types
+        INVALID_INPUT_QUERY = 'fixed_acidity=invalid_string_instead_of_float'
+
+        DOCKER_IMAGE = 'thrinadhprasadapu/wine-quality:latest'
+        CONTAINER_NAME = "inference-api-${BUILD_NUMBER}"
+        API_PORT = '8000'
     }
 
     stages {
-        stage('Checkout') {
+        stage('Pull Image') {
             steps {
-                // Task 4 - Stage 1: Checkout
-                checkout scm
-            }
-        }
-
-        stage('Setup Python Virtual Environment') {
-            steps {
-                // Task 4 - Stage 2: Setup Python Virtual Environment
-                sh '''
-                    python3 -m venv venv
-                    . venv/bin/activate
-                    pip install --upgrade pip
-                    pip install -r requirements.txt
-                '''
-            }
-        }
-
-        stage('Train Model') {
-            steps {
-                // Task 4 - Stage 3: Train Model
-                sh '''
-                    . venv/bin/activate
-                    python scripts/train.py
-                '''
-            }
-        }
-
-        stage('Read Accuracy') {
-            steps {
-                // Task 4 - Stage 4: Read Accuracy
                 script {
-                    env.CURRENT_ACCURACY = sh(script: "jq -r '.R2' app/artifacts/metrics.json", returnStdout: true).trim()
-                    echo "Current R2 Score: ${env.CURRENT_ACCURACY}"
+                    echo "Pulling Docker image: ${env.DOCKER_IMAGE}"
+                    def pullStatus = sh(script: "docker pull ${env.DOCKER_IMAGE}", returnStatus: true)
+                    
+                    if (pullStatus == 0) {
+                        echo "Verify: Image download was successful."
+                    } else {
+                        error "Failed to pull Docker image."
+                    }
                 }
             }
         }
 
-        stage('Compare Accuracy') {
+        stage('Run Container') {
             steps {
-                // Task 4 - Stage 5: Compare Accuracy
-                withCredentials([string(credentialsId: 'best-accuracy', variable: 'BEST_ACCURACY')]) {
-                    script {
-                        def currentAcc = env.CURRENT_ACCURACY.toDouble()
-                        def bestAcc = env.BEST_ACCURACY.toDouble()
-                        
-                        echo "Comparing Current: ${currentAcc} with Best: ${bestAcc}"
-                        
-                        if (currentAcc > bestAcc) {
-                            env.IS_BETTER = 'true'
-                            echo "Metric improved. Proceeding with deployment."
-                        } else {
-                            env.IS_BETTER = 'false'
-                            echo "Metric did not improve. Model will not be deployed."
+                script {
+                    echo "Starting container: ${env.CONTAINER_NAME} exposing port ${env.API_PORT}"
+                    sh "docker run -d --name ${env.CONTAINER_NAME} -p ${env.API_PORT}:8000 ${env.DOCKER_IMAGE}"
+                }
+            }
+        }
+
+        stage('Wait for Service Readiness') {
+            steps {
+                script {
+                    echo "Waiting for API to respond to health endpoint..."
+                    def ready = false
+                    // Retry up to 10 times with 3 seconds delay (30s timeout)
+                    for (int i = 0; i < 10; i++) {
+                        def res = sh(script: "curl -s -o /dev/null -w '%{http_code}' http://localhost:${env.API_PORT}/docs || echo 'FAIL'", returnStdout: true).trim()
+                        if (res == '200' || res == '307') {
+                            ready = true
+                            echo "Service is ready."
+                            break
                         }
+                        echo "Service not ready yet, retrying in 3 seconds..."
+                        sleep(3)
+                    }
+
+                    if (!ready) {
+                        error "Service did not start within timeout."
                     }
                 }
             }
         }
 
-        stage('Build Docker Image') {
-            when {
-                environment name: 'IS_BETTER', value: 'true'
-            }
+        stage('Send Valid Inference Request') {
             steps {
-                // Task 4 - Stage 6: Build Docker Image (Conditional)
                 script {
-                    docker.withRegistry('', REGISTRY_CREDENTIALS) {
-                        dockerImage = docker.build("${env.DOCKER_IMAGE}:${env.BUILD_NUMBER}")
+                    echo "Sending valid inference request with input: ${env.VALID_INPUT_QUERY}"
+                    def url = "http://localhost:${env.API_PORT}/predict?${env.VALID_INPUT_QUERY}"
+                    
+                    // Task 4: Logging and Reporting - Jenkins console logs show API responses
+                    def response = sh(script: "curl -s -w '\\nHTTP_STATUS:%{http_code}' '${url}'", returnStdout: true).trim()
+                    echo "API Response Array:\n${response}"
+                    
+                    def respLines = response.split('\nHTTP_STATUS:')
+                    def jsonBody = respLines[0]
+                    def httpCode = respLines.size() > 1 ? respLines[1] : ""
+                    
+                    echo "Validation Check -> HTTP Status Code: ${httpCode}"
+                    
+                    if (httpCode != '200') {
+                        error("Validation Failed: HTTP status code is ${httpCode}, expected 200.")
                     }
+                    
+                    def cmdExists = "echo '${jsonBody}' | jq -r 'has(\"wine_quality\")'"
+                    def fieldExists = sh(script: cmdExists, returnStdout: true).trim()
+                    if (fieldExists != 'true') {
+                        error("Validation Failed: Prediction field 'wine_quality' does not exist in response.")
+                    }
+                    
+                    def cmdValue = "echo '${jsonBody}' | jq -r '.wine_quality'"
+                    def predictionValue = sh(script: cmdValue, returnStdout: true).trim()
+                    echo "Validation Check -> Prediction Value: ${predictionValue}"
+                    
+                    if (!predictionValue.isNumber()) {
+                        error("Validation Failed: Prediction value '${predictionValue}' is not numeric.")
+                    }
+                    
+                    echo "Valid request successful. All validation checks passed."
                 }
             }
         }
 
-        stage('Push Docker Image') {
-            when {
-                environment name: 'IS_BETTER', value: 'true'
-            }
+        stage('Send Invalid Request') {
             steps {
-                // Task 4 - Stage 7: Push Docker Image (Conditional)
                 script {
-                    docker.withRegistry('', REGISTRY_CREDENTIALS) {
-                        dockerImage.push("${env.BUILD_NUMBER}")
-                        dockerImage.push('latest')
+                    echo "Sending invalid inference request with input: ${env.INVALID_INPUT_QUERY}"
+                    def url = "http://localhost:${env.API_PORT}/predict?${env.INVALID_INPUT_QUERY}"
+                    
+                    // Task 4: Logging and Reporting - Jenkins console logs show API responses
+                    def response = sh(script: "curl -s -w '\\nHTTP_STATUS:%{http_code}' '${url}'", returnStdout: true).trim()
+                    echo "API Error Response Array:\n${response}"
+                    
+                    def respLines = response.split('\nHTTP_STATUS:')
+                    def jsonBody = respLines[0]
+                    def httpCode = respLines.size() > 1 ? respLines[1] : ""
+                    
+                    echo "Validation Check -> HTTP Status Code for Invalid: ${httpCode}"
+                    
+                    if (httpCode == '200') {
+                        error("Validation Failed: Expected error response, but API returned 200 OK.")
+                    } else {
+                        echo "API returned error response as expected."
                     }
+                    
+                    def errorDetail = sh(script: "echo '${jsonBody}' | jq -r '.detail'", returnStdout: true).trim()
+                    if (errorDetail == 'null' || errorDetail.isEmpty()) {
+                        error("Validation Failed: Error message from API is not meaningful or not found.")
+                    } else {
+                        echo "Meaningful error message received: ${errorDetail}"
+                    }
+                }
+            }
+        }
+        
+        stage('Stop Container') {
+            steps {
+                script {
+                    // Task 3: Stage 6 - Stop and remove container
+                    echo "Stopping and removing container: ${env.CONTAINER_NAME}"
+                    sh "docker stop ${env.CONTAINER_NAME} || true"
+                    sh "docker rm ${env.CONTAINER_NAME} || true"
+                    echo "Ensure no leftover running containers related to this pipeline run."
+                }
+            }
+        }
+
+        stage('Pipeline Result') {
+            steps {
+                script {
+                    echo "Pipeline reached the end of validation steps successfully."
+                    // Stage 7: Pipeline Result
+                    // Mark pipeline successful only if all tests pass
+                    currentBuild.result = 'SUCCESS'
                 }
             }
         }
@@ -100,8 +159,18 @@ pipeline {
 
     post {
         always {
-            // Task 5: Artifact Archiving
-            archiveArtifacts artifacts: 'app/artifacts/**', allowEmptyArchive: true
+            script {
+                // Ensure we delete container on pipeline abort or error
+                sh "docker stop ${env.CONTAINER_NAME} || true"
+                sh "docker rm ${env.CONTAINER_NAME} || true"
+            }
+        }
+        failure {
+            script {
+                // Task 3: Stage 7 - Mark pipeline failed if any validation step fails
+                currentBuild.result = 'FAILURE'
+                echo "Pipeline marked as failed due to validation errors."
+            }
         }
     }
 }
