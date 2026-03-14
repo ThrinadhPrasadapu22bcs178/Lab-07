@@ -43,9 +43,15 @@ pipeline {
                 script {
                     echo "Waiting for API to respond to health endpoint..."
                     def ready = false
+                    
+                    // Extract internal container IP instead of using localhost
+                    env.CONTAINER_IP = sh(script: "docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ${env.CONTAINER_NAME}", returnStdout: true).trim()
+                    echo "Container is running at IP: ${env.CONTAINER_IP}"
+
                     // Retry up to 15 times with 5 seconds delay (75s timeout)
                     for (int i = 0; i < 15; i++) {
-                        def res = sh(script: "curl -s -o /dev/null -w '%{http_code}' http://localhost:${env.API_PORT}/docs || echo 'FAIL'", returnStdout: true).trim()
+                        def url = "http://${env.CONTAINER_IP}:8000/docs"
+                        def res = sh(script: "curl -s -o /dev/null -w '%{http_code}' '${url}' || echo 'FAIL'", returnStdout: true).trim()
                         if (res == '200' || res == '307') {
                             ready = true
                             echo "Service is ready."
@@ -66,7 +72,7 @@ pipeline {
             steps {
                 script {
                     echo "Sending valid inference request with input: ${env.VALID_INPUT_QUERY}"
-                    def url = "http://localhost:${env.API_PORT}/predict?${env.VALID_INPUT_QUERY}"
+                    def url = "http://${env.CONTAINER_IP}:8000/predict?${env.VALID_INPUT_QUERY}"
                     
                     // Task 4: Logging and Reporting - Jenkins console logs show API responses
                     def response = sh(script: "curl -s -w '\\nHTTP_STATUS:%{http_code}' '${url}'", returnStdout: true).trim()
@@ -105,7 +111,7 @@ pipeline {
             steps {
                 script {
                     echo "Sending invalid inference request with input: ${env.INVALID_INPUT_QUERY}"
-                    def url = "http://localhost:${env.API_PORT}/predict?${env.INVALID_INPUT_QUERY}"
+                    def url = "http://${env.CONTAINER_IP}:8000/predict?${env.INVALID_INPUT_QUERY}"
                     
                     // Task 4: Logging and Reporting - Jenkins console logs show API responses
                     def response = sh(script: "curl -s -w '\\nHTTP_STATUS:%{http_code}' '${url}'", returnStdout: true).trim()
